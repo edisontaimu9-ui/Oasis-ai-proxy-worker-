@@ -133,17 +133,32 @@ async function handlePubmedProxy(request, env) {
 }
 
 // ── Frontiers Search API pass-through ─────────────────────────────────
-// Client calls: /frontiers?query=...&limit=...&offset=...
+// Client calls: POST /frontiers  { query, limit, offset }
+// Frontiers' Search API requires POST with a JSON body (confirmed via
+// their own "does not support http method GET" error) rather than GET
+// with query params.
 async function handleFrontiersProxy(request, env) {
-  const url = new URL(request.url);
-  const upstream = new URL('https://search-api.frontiersin.org/api/V1/search');
-  url.searchParams.forEach((value, key) => upstream.searchParams.set(key, value));
+  let payload;
+  try {
+    payload = await request.json();
+  } catch (_) {
+    payload = {};
+  }
+  const { query, limit, offset } = payload || {};
+  if (!query) return json({ error: { message: '"query" is required.' } }, 400);
 
-  const upstreamRes = await fetch(upstream.toString(), {
+  const upstreamRes = await fetch('https://search-api.frontiersin.org/api/V1/search', {
+    method: 'POST',
     headers: {
       'X-ELS-APIKey': env.FRONTIERS_API_KEY || '',
+      'Content-Type': 'application/json',
       'Accept': 'application/json',
     },
+    body: JSON.stringify({
+      query: query,
+      limit: limit || 10,
+      offset: offset || 0,
+    }),
   });
   return passThrough(upstreamRes);
 }
@@ -198,7 +213,7 @@ export default {
     if (url.pathname === '/pubmed' && request.method === 'GET') {
       return handlePubmedProxy(request, env);
     }
-    if (url.pathname === '/frontiers' && request.method === 'GET') {
+    if (url.pathname === '/frontiers' && request.method === 'POST') {
       return handleFrontiersProxy(request, env);
     }
     if (url.pathname === '/elsevier' && request.method === 'GET') {
