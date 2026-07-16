@@ -7,7 +7,7 @@
  * Set them with:  wrangler secret put GROQ_API_KEY   (etc.)
  */
 
-const ALLOWED_ORIGIN = '*'; // ⚠️ consider restricting to your real domain, e.g. 'https://yourapp.com'
+const ALLOWED_ORIGIN = 'https://oasiscnst.app';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
