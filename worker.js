@@ -29,6 +29,34 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+// ── Abuse limits ──────────────────────────────────────────────────────
+// CORS only stops other *websites* in a browser; curl/scripts ignore it.
+// These server-side limits protect your Groq/OpenRouter quota regardless.
+const MAX_TOKENS_CAP = 2000;          // hard ceiling per request (frontend uses <=1400)
+const DEFAULT_MAX_TOKENS = 900;
+const MAX_MESSAGES = 40;              // max messages in one request
+const MAX_BODY_CHARS = 120000;        // max total characters across all messages
+
+// Only these models can be requested. Anything else falls back to the default.
+const ALLOWED_MODELS = {
+  GROQ_API_KEY: ['openai/gpt-oss-120b'],
+  OPENROUTER_API_KEY: ['openrouter/auto'],
+};
+
+// Per-IP rate limit using Cloudflare's Rate Limiting binding (RATE_LIMITER,
+// declared in wrangler.toml). If the binding is missing the check is skipped,
+// so the Worker still runs before you've added it.
+async function isRateLimited(request, env) {
+  if (!env.RATE_LIMITER) return false;
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  try {
+    const { success } = await env.RATE_LIMITER.limit({ key: ip });
+    return !success;
+  } catch (_) {
+    return false; // fail open: a limiter outage shouldn't take the app down
+  }
+}
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -63,6 +91,10 @@ async function proxyChatCompletion({ request, env, apiKeyName, apiUrl, defaultMo
     return json({ error: { message: `${apiKeyName} is not configured on the server.` } }, 500);
   }
 
+  if (await isRateLimited(request, env)) {
+    return json({ error: { message: 'Too many requests. Please wait a moment and try again.' } }, 429);
+  }
+
   let payload;
   try {
     payload = await request.json();
@@ -74,6 +106,23 @@ async function proxyChatCompletion({ request, env, apiKeyName, apiUrl, defaultMo
   if (!Array.isArray(messages)) {
     return json({ error: { message: '"messages" array is required.' } }, 400);
   }
+  if (messages.length === 0 || messages.length > MAX_MESSAGES) {
+    return json({ error: { message: `"messages" must contain 1-${MAX_MESSAGES} items.` } }, 400);
+  }
+  const totalChars = messages.reduce((n, m) => n + (typeof m?.content === 'string' ? m.content.length : JSON.stringify(m?.content ?? '').length), 0);
+  if (totalChars > MAX_BODY_CHARS) {
+    return json({ error: { message: 'Request too large.' } }, 413);
+  }
+
+  // Server decides the model and the token ceiling, not the caller.
+  const allowed = ALLOWED_MODELS[apiKeyName] || [defaultModel];
+  const safeModel = allowed.includes(model) ? model : defaultModel;
+  const requestedTokens = Number(max_tokens);
+  const safeMaxTokens = Math.min(
+    Number.isFinite(requestedTokens) && requestedTokens > 0 ? Math.floor(requestedTokens) : DEFAULT_MAX_TOKENS,
+    MAX_TOKENS_CAP
+  );
+  const safeTemperature = Math.min(Math.max(Number(temperature ?? 0.3) || 0, 0), 1.5);
 
   const upstreamRes = await fetch(apiUrl, {
     method: 'POST',
@@ -82,9 +131,9 @@ async function proxyChatCompletion({ request, env, apiKeyName, apiUrl, defaultMo
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: model || defaultModel,
-      max_tokens: max_tokens || 900,
-      temperature: temperature ?? 0.3,
+      model: safeModel,
+      max_tokens: safeMaxTokens,
+      temperature: safeTemperature,
       messages,
     }),
   });
@@ -116,6 +165,7 @@ function handleOpenRouterProxy(request, env) {
 // Worker forwards to https://eutils.ncbi.nlm.nih.gov/entrez/eutils/<endpoint>.fcgi
 // with the same params, plus api_key injected server-side.
 async function handlePubmedProxy(request, env) {
+  if (await isRateLimited(request, env)) return json({ error: { message: 'Too many requests.' } }, 429);
   const url = new URL(request.url);
   const endpoint = url.searchParams.get('endpoint');
   if (!['esearch', 'esummary', 'efetch'].includes(endpoint)) {
@@ -138,6 +188,7 @@ async function handlePubmedProxy(request, env) {
 // their own "does not support http method GET" error) rather than GET
 // with query params.
 async function handleFrontiersProxy(request, env) {
+  if (await isRateLimited(request, env)) return json({ error: { message: 'Too many requests.' } }, 429);
   let payload;
   try {
     payload = await request.json();
@@ -169,6 +220,7 @@ async function handleFrontiersProxy(request, env) {
 //   /elsevier?endpoint=sciencedirect&query=...&count=...&start=...&field=...
 //   /elsevier?endpoint=abstract&scopusId=...
 async function handleElsevierProxy(request, env) {
+  if (await isRateLimited(request, env)) return json({ error: { message: 'Too many requests.' } }, 429);
   const url = new URL(request.url);
   const endpoint = url.searchParams.get('endpoint');
 

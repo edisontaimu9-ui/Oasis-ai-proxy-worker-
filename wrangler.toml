@@ -7,3 +7,12 @@ compatibility_date = "2026-07-16"
 # FATSECRET_CONSUMER_SECRET) are NOT set here — set them via:
 #   wrangler secret put GROQ_API_KEY
 # for each one, so they never live in this file or in git.
+
+# Per-IP rate limit (used by worker.js as env.RATE_LIMITER).
+# 60 requests per 60 seconds per IP. period must be 10 or 60.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 60
+  period = 60

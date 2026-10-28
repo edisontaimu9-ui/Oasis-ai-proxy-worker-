@@ -41,12 +41,11 @@ Also update your Content-Security-Policy `connect-src` line in `index.html`
 (around line 101) to include `https://*.workers.dev` (or your exact Worker
 URL) instead of/alongside `https://*.appwrite.run`.
 
-## Note on CORS / secrets
-`Access-Control-Allow-Origin: '*'` means literally any website can call this
-endpoint and read back these keys — including `VAPID_PRIVATE_KEY`, which
-should never leave your server. Two possible improvements, either safe to do
-independently of the CF migration:
-- Set `ALLOWED_ORIGIN` in `worker.js` to your actual site's origin instead of `'*'`.
-- Stop returning `VAPID_PRIVATE_KEY` (and, elsewhere in your app, any payment
-  secret keys) from this endpoint entirely — those are only needed
-  server-side to sign push notifications / verify payments, not in the browser.
+## Security notes
+- CORS is locked to `https://oasiscnst.app` (`ALLOWED_ORIGIN` in `worker.js`).
+  This only restricts other websites in a browser; it does not stop curl or scripts.
+- `/config` returns only `VAPID_PUBLIC_KEY`. No private key or secret is ever returned.
+- `/groq` and `/openrouter` enforce a server-side model allowlist, a `max_tokens`
+  ceiling (2000), and message count/size limits, whatever the caller sends.
+- All routes are rate limited per IP via the `RATE_LIMITER` binding in
+  `wrangler.toml` (60 requests / 60 s). Adjust `limit` there if real users hit it.
