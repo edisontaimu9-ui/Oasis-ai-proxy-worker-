@@ -3,7 +3,7 @@ main = "worker.js"
 compatibility_date = "2026-07-16"
 
 # Secrets (GROQ_API_KEY, OPENROUTER_API_KEY, PUBMED_API_KEY, FRONTIERS_API_KEY,
-# ELSEVIER_API_KEY, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, FATSECRET_CONSUMER_KEY,
+# ELSEVIER_API_KEY, CNR_API_KEY, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, FATSECRET_CONSUMER_KEY,
 # FATSECRET_CONSUMER_SECRET) are NOT set here — set them via:
 #   wrangler secret put GROQ_API_KEY
 # for each one, so they never live in this file or in git.
@@ -16,3 +16,10 @@ namespace_id = "1001"
   [ratelimits.simple]
   limit = 60
   period = 60
+
+# Service binding to the Chakudya API Worker. Cloudflare blocks a Worker from
+# fetching another Worker's public *.workers.dev URL on the same account, so the
+# /cnr/* routes call it through this binding instead.
+[[services]]
+binding = "CHAKUDYA_API"
+service = "chakudya-api"

@@ -13,6 +13,7 @@ wrangler secret put OPENROUTER_API_KEY
 wrangler secret put PUBMED_API_KEY
 wrangler secret put FRONTIERS_API_KEY
 wrangler secret put ELSEVIER_API_KEY
+wrangler secret put CNR_API_KEY
 wrangler secret put VAPID_PUBLIC_KEY
 wrangler secret put VAPID_PRIVATE_KEY
 wrangler secret put FATSECRET_CONSUMER_KEY
@@ -49,3 +50,7 @@ URL) instead of/alongside `https://*.appwrite.run`.
   ceiling (2000), and message count/size limits, whatever the caller sends.
 - All routes are rate limited per IP via the `RATE_LIMITER` binding in
   `wrangler.toml` (60 requests / 60 s). Adjust `limit` there if real users hit it.
+- `/cnr/*` forwards an allowlist of read-only CNR GET routes (food search,
+  autocomplete, substitutes, compare, convert, DRI, measures) and adds
+  `CNR_API_KEY` server-side. Set it as a Worker secret; it is never in the repo.
+  The calls go through the `CHAKUDYA_API` service binding in `wrangler.toml`.

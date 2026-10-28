@@ -10,6 +10,9 @@
  *   GET  /pubmed?endpoint=...  -> pass-through to NCBI E-utilities (esearch/esummary/efetch).
  *   GET  /frontiers            -> pass-through to Frontiers Search API.
  *   GET  /elsevier?endpoint=... -> pass-through to Elsevier (scopus/sciencedirect/abstract).
+ *   GET  /cnr/<path>?...       -> read-only pass-through to the Chakudya Nutrition
+ *                                 Registry (CNR). Adds CNR_API_KEY server-side; only
+ *                                 allowlisted GET paths (food search etc.) are forwarded.
  *
  * The pubmed/frontiers/elsevier routes are deliberate pass-throughs: the
  * client sends the same query params it always did (minus any key), the
@@ -248,6 +251,72 @@ async function handleElsevierProxy(request, env) {
   return passThrough(upstreamRes);
 }
 
+// ── Chakudya Nutrition Registry (CNR) read-only pass-through ───────────
+// Client calls: GET /cnr/foods/search?q=nsima&max_results=10   (etc)
+// The Worker forwards to the CNR API with CNR_API_KEY added server-side, so
+// the key never reaches the browser. Only the GET paths below are allowed;
+// all admin/write routes stay unreachable from here.
+const CNR_ORIGIN = 'https://chakudya-api.edisontaimu9.workers.dev';
+const CNR_ALLOWED_PATHS = [
+  /^\/foods$/,
+  /^\/foods\/(search|autocomplete|substitutes|compare|convert|lookup|categories|by-category|local-categories|baby-foods)$/,
+  /^\/foods\/\d+\/convert$/,
+  /^\/measures$/,
+  /^\/measures\/convert$/,
+  /^\/dri$/,
+  /^\/dri\/life-stages$/,
+];
+const CNR_MAX_PAGE = 100; // ceiling for limit / max_results
+
+async function handleCnrProxy(request, env, url) {
+  if (await isRateLimited(request, env)) {
+    return json({ error: { message: 'Too many requests.' } }, 429);
+  }
+  if (!env.CNR_API_KEY) {
+    return json({ error: { message: 'CNR_API_KEY is not configured on the server.' } }, 500);
+  }
+
+  const path = url.pathname.slice('/cnr'.length); // '/cnr/foods/search' -> '/foods/search'
+  if (!CNR_ALLOWED_PATHS.some((re) => re.test(path))) {
+    return json({ error: { message: 'Not found' } }, 404);
+  }
+
+  const upstream = new URL(CNR_ORIGIN + path);
+  url.searchParams.forEach((value, key) => {
+    if (key === 'api_key') return; // never let a caller smuggle a key through
+    upstream.searchParams.set(key, value);
+  });
+  for (const k of ['limit', 'max_results']) {
+    const v = Number(upstream.searchParams.get(k));
+    if (upstream.searchParams.has(k) && Number.isFinite(v) && v > CNR_MAX_PAGE) {
+      upstream.searchParams.set(k, String(CNR_MAX_PAGE));
+    }
+  }
+
+  const upstreamReq = new Request(upstream.toString(), {
+    method: 'GET',
+    headers: { 'Authorization': `Bearer ${env.CNR_API_KEY}`, 'Accept': 'application/json' },
+  });
+
+  // Cloudflare blocks a Worker fetching another Worker's public *.workers.dev
+  // URL on the same account, so prefer the service binding (see wrangler.toml)
+  // and fall back to a plain fetch if it is ever unset.
+  let upstreamRes;
+  try {
+    upstreamRes = env.CHAKUDYA_API ? await env.CHAKUDYA_API.fetch(upstreamReq) : await fetch(upstreamReq);
+  } catch (_) {
+    return json({ error: { message: 'CNR is unreachable right now.' } }, 502);
+  }
+
+  const text = await upstreamRes.text();
+  const headers = {
+    'Content-Type': upstreamRes.headers.get('Content-Type') || 'application/json',
+    ...corsHeaders,
+  };
+  if (upstreamRes.ok) headers['Cache-Control'] = 'public, max-age=300'; // browsers may reuse for 5 min
+  return new Response(text, { status: upstreamRes.status, headers });
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
@@ -270,6 +339,9 @@ export default {
     }
     if (url.pathname === '/elsevier' && request.method === 'GET') {
       return handleElsevierProxy(request, env);
+    }
+    if (url.pathname.startsWith('/cnr/') && request.method === 'GET') {
+      return handleCnrProxy(request, env, url);
     }
     if (url.pathname === '/config' || url.pathname === '/') {
       return handleConfig(env);
