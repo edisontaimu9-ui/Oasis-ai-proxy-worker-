@@ -50,7 +50,11 @@ URL) instead of/alongside `https://*.appwrite.run`.
   ceiling (2000), and message count/size limits, whatever the caller sends.
 - All routes are rate limited per IP via the `RATE_LIMITER` binding in
   `wrangler.toml` (60 requests / 60 s). Adjust `limit` there if real users hit it.
-- `/cnr/*` forwards an allowlist of read-only CNR GET routes (food search,
-  autocomplete, substitutes, compare, convert, DRI, measures) and adds
-  `CNR_API_KEY` server-side. Set it as a Worker secret; it is never in the repo.
-  The calls go through the `CHAKUDYA_API` service binding in `wrangler.toml`.
+- `/cnr/*` forwards an allowlist of CNR routes and adds `CNR_API_KEY` server-side
+  (set it as a Worker secret; it is never in the repo). GET: foods (search,
+  lookup, autocomplete, substitutes, compare, convert, paging), formulas,
+  exchange, renal, packaged, DRI, measures, memory recall. POST: `/rag/retrieve`,
+  `/rag/ask`, `/memory/write`, `/memory/recall`, `/packaged/submit`,
+  `/packaged/scan`, each with a body size limit. Admin and registry-write routes
+  are not reachable, and any `Authorization` header from the browser is ignored.
+  Calls go through the `CHAKUDYA_API` service binding in `wrangler.toml`.

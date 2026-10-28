@@ -10,9 +10,10 @@
  *   GET  /pubmed?endpoint=...  -> pass-through to NCBI E-utilities (esearch/esummary/efetch).
  *   GET  /frontiers            -> pass-through to Frontiers Search API.
  *   GET  /elsevier?endpoint=... -> pass-through to Elsevier (scopus/sciencedirect/abstract).
- *   GET  /cnr/<path>?...       -> read-only pass-through to the Chakudya Nutrition
- *                                 Registry (CNR). Adds CNR_API_KEY server-side; only
- *                                 allowlisted GET paths (food search etc.) are forwarded.
+ *   GET|POST /cnr/<path>       -> pass-through to the Chakudya Nutrition Registry (CNR).
+ *                                 Adds CNR_API_KEY server-side; only allowlisted routes
+ *                                 (food search/lookup/sync, formulas, RAG, memory, packaged
+ *                                 foods) are forwarded. No admin or registry-write routes.
  *
  * The pubmed/frontiers/elsevier routes are deliberate pass-throughs: the
  * client sends the same query params it always did (minus any key), the
@@ -251,22 +252,39 @@ async function handleElsevierProxy(request, env) {
   return passThrough(upstreamRes);
 }
 
-// ── Chakudya Nutrition Registry (CNR) read-only pass-through ───────────
-// Client calls: GET /cnr/foods/search?q=nsima&max_results=10   (etc)
+// ── Chakudya Nutrition Registry (CNR) pass-through ─────────────────────
+// Client calls: GET /cnr/foods/search?q=nsima&max_results=10, POST /cnr/rag/ask, ...
 // The Worker forwards to the CNR API with CNR_API_KEY added server-side, so
-// the key never reaches the browser. Only the GET paths below are allowed;
-// all admin/write routes stay unreachable from here.
+// the key never reaches the browser. Only the routes below are reachable;
+// admin, key-management and registry-write routes are not, and any
+// Authorization header the browser sends is ignored.
 const CNR_ORIGIN = 'https://chakudya-api.edisontaimu9.workers.dev';
-const CNR_ALLOWED_PATHS = [
-  /^\/foods$/,
-  /^\/foods\/(search|autocomplete|substitutes|compare|convert|lookup|categories|by-category|local-categories|baby-foods)$/,
-  /^\/foods\/\d+\/convert$/,
-  /^\/measures$/,
-  /^\/measures\/convert$/,
-  /^\/dri$/,
-  /^\/dri\/life-stages$/,
+
+// Read routes. `live: true` means never cache (user-specific or must be fresh).
+const CNR_GET_ROUTES = [
+  { re: /^\/foods$/ },
+  { re: /^\/foods\/(search|autocomplete|substitutes|compare|convert|lookup|categories|by-category|local-categories|baby-foods)$/ },
+  { re: /^\/foods\/\d+\/convert$/ },
+  { re: /^\/formulas$/ },
+  { re: /^\/exchange$/ },
+  { re: /^\/renal$/ },
+  { re: /^\/measures$/ },
+  { re: /^\/measures\/convert$/ },
+  { re: /^\/dri$/ },
+  { re: /^\/dri\/life-stages$/ },
+  { re: /^\/packaged$/, live: true },
+  { re: /^\/memory\/recall$/, live: true },
 ];
-const CNR_MAX_PAGE = 100; // ceiling for limit / max_results
+
+// Write / compute routes, each with a max request body size.
+const CNR_POST_ROUTES = [
+  { re: /^\/rag\/(retrieve|ask)$/, maxBytes: 64 * 1024 },
+  { re: /^\/memory\/(write|recall)$/, maxBytes: 64 * 1024 },
+  { re: /^\/packaged\/submit$/, maxBytes: 256 * 1024 },
+  { re: /^\/packaged\/scan$/, maxBytes: 8 * 1024 * 1024 }, // photo upload
+];
+
+const CNR_MAX_PAGE = 500; // ceiling for limit / max_results (Oasis syncs foods 200 at a time)
 
 async function handleCnrProxy(request, env, url) {
   if (await isRateLimited(request, env)) {
@@ -276,8 +294,10 @@ async function handleCnrProxy(request, env, url) {
     return json({ error: { message: 'CNR_API_KEY is not configured on the server.' } }, 500);
   }
 
+  const method = request.method;
   const path = url.pathname.slice('/cnr'.length); // '/cnr/foods/search' -> '/foods/search'
-  if (!CNR_ALLOWED_PATHS.some((re) => re.test(path))) {
+  const route = (method === 'GET' ? CNR_GET_ROUTES : CNR_POST_ROUTES).find((r) => r.re.test(path));
+  if (!route) {
     return json({ error: { message: 'Not found' } }, 404);
   }
 
@@ -293,10 +313,17 @@ async function handleCnrProxy(request, env, url) {
     }
   }
 
-  const upstreamReq = new Request(upstream.toString(), {
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${env.CNR_API_KEY}`, 'Accept': 'application/json' },
-  });
+  const headers = { 'Authorization': `Bearer ${env.CNR_API_KEY}`, 'Accept': 'application/json' };
+  let body;
+  if (method === 'POST') {
+    const declared = Number(request.headers.get('Content-Length') || 0);
+    if (declared > route.maxBytes) return json({ error: { message: 'Request too large.' } }, 413);
+    body = await request.arrayBuffer();
+    if (body.byteLength > route.maxBytes) return json({ error: { message: 'Request too large.' } }, 413);
+    headers['Content-Type'] = request.headers.get('Content-Type') || 'application/json';
+  }
+
+  const upstreamReq = new Request(upstream.toString(), { method, headers, body });
 
   // Cloudflare blocks a Worker fetching another Worker's public *.workers.dev
   // URL on the same account, so prefer the service binding (see wrangler.toml)
@@ -309,12 +336,17 @@ async function handleCnrProxy(request, env, url) {
   }
 
   const text = await upstreamRes.text();
-  const headers = {
+  const resHeaders = {
     'Content-Type': upstreamRes.headers.get('Content-Type') || 'application/json',
     ...corsHeaders,
   };
-  if (upstreamRes.ok) headers['Cache-Control'] = 'public, max-age=300'; // browsers may reuse for 5 min
-  return new Response(text, { status: upstreamRes.status, headers });
+  if (method === 'GET' && upstreamRes.ok) {
+    // Reference lookups may be reused for 5 minutes; live/user-specific reads never.
+    resHeaders['Cache-Control'] = route.live ? 'no-store' : 'public, max-age=300';
+  } else {
+    resHeaders['Cache-Control'] = 'no-store';
+  }
+  return new Response(text, { status: upstreamRes.status, headers: resHeaders });
 }
 
 export default {
@@ -340,7 +372,7 @@ export default {
     if (url.pathname === '/elsevier' && request.method === 'GET') {
       return handleElsevierProxy(request, env);
     }
-    if (url.pathname.startsWith('/cnr/') && request.method === 'GET') {
+    if (url.pathname.startsWith('/cnr/') && (request.method === 'GET' || request.method === 'POST')) {
       return handleCnrProxy(request, env, url);
     }
     if (url.pathname === '/config' || url.pathname === '/') {
